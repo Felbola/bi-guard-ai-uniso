@@ -1,357 +1,310 @@
-import hashlib
-import numpy as np
-import pandas as pd
 import plotly.express as px
-from sklearn.linear_model import LinearRegression
+from src.analytics_ml import detect_transaction_anomalies, forecast_monthly_revenue
+from src.data_engine import generate_enterprise_dataset, load_uploaded_csv
+from src.nlq_engine import execute_analytical_query
+from src.privacy_guard import apply_privacy_pipeline
 import streamlit as st
 
-# ==========================================
-# CONFIGURAÇÃO DA PÁGINA
-# ==========================================
 st.set_page_config(
-    page_title="BI Guard & AI Insights | UNISO", page_icon="📊", layout="wide"
+    page_title="BI Guard | Governança & Analytics",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# Estilo limpo para cards e cabeçalhos
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 1.8rem; padding-bottom: 2rem; }
+    div[data-testid="stMetric"] {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        padding: 14px 18px;
+        border-radius: 8px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ==========================================
-# GERAÇÃO DE DATASET SINTÉTICO (BIG DATA / VAREJO)
+# SIDEBAR: FONTE DE DADOS E GOVERNANÇA
 # ==========================================
-@st.cache_data
-def carregar_dados(n_registros=500):
-    np.random.seed(42)
-    datas = pd.date_range(start="2025-01-01", end="2026-10-31", freq="D")
-    regioes = ["Sudeste", "Sul", "Nordeste", "Centro-Oeste", "Norte"]
-    categorias = [
-        "Eletrônicos",
-        "Cloud & Software",
-        "Acessórios",
-        "Consultoria TI",
-    ]
-    nomes = [
-        "Ana Silva",
-        "Carlos Souza",
-        "Mariana Lima",
-        "João Pereira",
-        "Fernanda Costa",
-        "Lucas Oliveira",
-        "Beatriz Santos",
-        "Rafael Almeida",
-        "Juliana Rocha",
-        "Pedro Martins",
-    ]
+with st.sidebar:
+    st.header("Configurações do Pipeline")
 
-    df = pd.DataFrame({
-        "ID_Transacao": [f"TRX-{10000+i}" for i in range(n_registros)],
-        "Data": np.random.choice(datas, n_registros),
-        "Cliente_Nome": np.random.choice(nomes, n_registros),
-        "CPF": [
-            (
-                f"{np.random.randint(100,999)}.{np.random.randint(100,999)}."
-                f"{np.random.randint(100,999)}-{np.random.randint(10,99)}"
-            )
-            for _ in range(n_registros)
-        ],
-        "Email": [
-            f"cliente{i}@exemplo.com.br"
-            for i in np.random.randint(1, 250, n_registros)
-        ],
-        "Regiao": np.random.choice(
-            regioes, n_registros, p=[0.45, 0.20, 0.18, 0.10, 0.07]
-        ),
-        "Categoria": np.random.choice(categorias, n_registros),
-        "Valor_Venda": np.round(np.random.uniform(150.0, 4800.0, n_registros), 2),
-        "Score_Risco_Churn": np.round(np.random.uniform(0.05, 0.95, n_registros), 2),
-    })
-    df["Data"] = pd.to_datetime(df["Data"])
-    df["Mes_Ano"] = df["Data"].dt.to_period("M").astype(str)
-    return df.sort_values("Data").reset_index(drop=True)
-
-
-# ==========================================
-# FUNÇÕES DE PRIVACIDADE E GOVERNANÇA (LGPD)
-# ==========================================
-def aplicar_governanca_lgpd(df, modo_lgpd, nivel_privacidade):
-    df_proc = df.copy()
-    if not modo_lgpd:
-        return df_proc
-
-    # Pseudonimização (Hash SHA-256 truncado)
-    df_proc["ID_Cliente_Hash"] = df_proc["CPF"].apply(
-        lambda x: hashlib.sha256(x.encode()).hexdigest()[:12].upper()
+    data_source = st.radio(
+        "Fonte de Dados",
+        ["Base Corporativa (Sintética)", "Upload CSV Externo"],
+        horizontal=False,
     )
 
-    # Mascaramento de PII (Personally Identifiable Information)
-    df_proc["Cliente_Nome"] = df_proc["Cliente_Nome"].apply(
-        lambda x: x[0] + "*** " + x.split()[-1][0] + "***"
-    )
-    df_proc["CPF"] = df_proc["CPF"].apply(lambda x: "***.***." + x[8:])
-    df_proc["Email"] = df_proc["Email"].apply(
-        lambda x: x[:2] + "****@" + x.split("@")[1]
-    )
+    if data_source == "Upload CSV Externo":
+        uploaded = st.file_uploader("Selecione um arquivo CSV", type=["csv"])
+        raw_df = (
+            load_uploaded_csv(uploaded)
+            if uploaded
+            else generate_enterprise_dataset()
+        )
+    else:
+        raw_df = generate_enterprise_dataset()
 
-    # Privacidade Diferencial (Adição de ruído estatístico controlado nos valores)
-    if nivel_privacidade == "Alta (Anonimização + Privacidade Diferencial)":
-        ruido = np.random.laplace(0, 50, size=len(df_proc))
-        df_proc["Valor_Venda"] = np.maximum(
-            0, np.round(df_proc["Valor_Venda"] + ruido, 2)
+    st.divider()
+    st.subheader("Governança e Privacidade (LGPD)")
+    lgpd_enabled = st.toggle("Camada de Proteção LGPD", value=True)
+
+    dp_mode = st.checkbox(
+        "Privacidade Diferencial (Laplace)",
+        value=False,
+        disabled=not lgpd_enabled,
+        help="Adiciona ruído estatístico calibrado pelo parâmetro Epsilon (ε).",
+    )
+    epsilon_val = None
+    if lgpd_enabled and dp_mode:
+        epsilon_val = st.slider(
+            "Orçamento de Privacidade (ε)",
+            min_value=0.1,
+            max_value=2.0,
+            value=0.8,
+            step=0.1,
         )
 
-    return df_proc
+    st.divider()
+    st.subheader("Filtros Analíticos")
 
+    if "region" in raw_df.columns:
+        selected_regions = st.multiselect(
+            "Regiões",
+            options=sorted(raw_df["region"].unique()),
+            default=sorted(raw_df["region"].unique()),
+        )
+        raw_df = raw_df[raw_df["region"].isin(selected_regions)]
 
-# ==========================================
-# BARRA LATERAL (CONTROLES DE GOVERNANÇA)
-# ==========================================
-st.sidebar.title("🛡️ Governança & Privacidade")
-st.sidebar.markdown(
-    "Controle de conformidade **LGPD** aplicado em tempo real sobre o"
-    " pipeline de BI."
+    if "date" in raw_df.columns and not raw_df.empty:
+        min_d, max_d = raw_df["date"].min().date(), raw_df["date"].max().date()
+        date_range = st.date_input(
+            "Período", value=(min_d, max_d), min_value=min_d, max_value=max_d
+        )
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            raw_df = raw_df[
+                (raw_df["date"].dt.date >= date_range[0])
+                & (raw_df["date"].dt.date <= date_range[1])
+            ]
+
+# Aplica governança antes de qualquer renderização
+df_clean, audit_metadata = apply_privacy_pipeline(
+    raw_df, enabled=lgpd_enabled, epsilon=epsilon_val
 )
-
-modo_lgpd = st.sidebar.toggle("Ativar Proteção de Dados (LGPD)", value=True)
-nivel_privacidade = st.sidebar.radio(
-    "Nível de Proteção:",
-    [
-        "Padrão (Mascaramento + Pseudonimização)",
-        "Alta (Anonimização + Privacidade Diferencial)",
-    ],
-    disabled=not modo_lgpd,
-)
-
-st.sidebar.divider()
-st.sidebar.subheader("Filtros Analíticos")
-df_bruto = carregar_dados(600)
-
-regioes_selecionadas = st.sidebar.multiselect(
-    "Filtrar Regiões:",
-    options=df_bruto["Regiao"].unique(),
-    default=df_bruto["Regiao"].unique(),
-)
-
-df_filtrado = df_bruto[df_bruto["Regiao"].isin(regioes_selecionadas)]
-df_exibicao = aplicar_governanca_lgpd(df_filtrado, modo_lgpd, nivel_privacidade)
 
 # ==========================================
 # CABEÇALHO PRINCIPAL
 # ==========================================
-st.title("📊 BI Guard & AI Insights")
-st.caption(
-    "Demonstração Prática: Tendências Futuras, IA Generativa e Privacidade em"
-    " Big Data"
-)
-
-if modo_lgpd:
-    st.success(
-        "🔒 **Modo LGPD Ativo:** Dados pessoais sensíveis (PII) mascarados"
-        " antes da visualização e bloqueados para envio a modelos de IA."
-    )
-else:
-    st.warning(
-        "⚠️ **Modo LGPD Desativado:** Dados sensíveis (Nome, CPF, E-mail)"
-        " expostos em texto claro. Risco de não conformidade!"
+col_title, col_status = st.columns([3, 1])
+with col_title:
+    st.title("BI Guard — Analytics & Governança")
+    st.caption(
+        "Arquitetura de Business Intelligence com Machine Learning, NLQ e"
+        " Conformidade LGPD"
     )
 
+with col_status:
+    if lgpd_enabled:
+        st.success("Status: Conformidade LGPD Ativa")
+    else:
+        st.error("Status: Dados PII Expostos")
+
+if df_clean.empty:
+    st.warning("Nenhum registro encontrado para os filtros selecionados.")
+    st.stop()
+
 # ==========================================
-# ABAS DA APLICAÇÃO
+# NAVEGAÇÃO POR ABAS
 # ==========================================
-aba1, aba2, aba3 = st.tabs([
-    "📈 1. BI Descritivo & Preditivo",
-    "🤖 2. Assistente BI com IA (NLQ)",
-    "🔐 3. Auditoria de Privacidade & Dados",
+tab_overview, tab_ml, tab_nlq, tab_audit = st.tabs([
+    "Visão Executiva",
+    "Modelos Preditivos & Anomalias",
+    "Consulta em Linguagem Natural (NLQ)",
+    "Auditoria LGPD & Linhagem",
 ])
 
 # ------------------------------------------
-# ABA 1: BI DESCRITIVO + PREDITIVO (ML)
+# ABA 1: VISÃO EXECUTIVA
 # ------------------------------------------
-with aba1:
-    col1, col2, col3, col4 = st.columns(4)
-    receita_total = df_exibicao["Valor_Venda"].sum()
-    ticket_medio = df_exibicao["Valor_Venda"].mean()
-    total_vendas = len(df_exibicao)
-    risco_medio = df_exibicao["Score_Risco_Churn"].mean() * 100
+with tab_overview:
+    k1, k2, k3, k4 = st.columns(4)
+    total_rev = df_clean["revenue"].sum()
+    avg_ticket = df_clean["revenue"].mean()
+    tx_count = len(df_clean)
+    avg_churn = df_clean["churn_probability"].mean() * 100
 
-    col1.metric("Receita Total", f"R$ {receita_total:,.2f}")
-    col2.metric("Ticket Médio", f"R$ {ticket_medio:,.2f}")
-    col3.metric("Volume de Transações", f"{total_vendas}")
-    col4.metric("Risco Médio de Churn", f"{risco_medio:.1f}%")
+    k1.metric("Receita Acumulada", f"R$ {total_rev:,.2f}")
+    k2.metric("Ticket Médio", f"R$ {avg_ticket:,.2f}")
+    k3.metric("Transações Processadas", f"{tx_count:,}".replace(",", "."))
+    k4.metric("Risco Médio de Churn", f"{avg_churn:.1f}%")
 
-    st.divider()
-    c_graf1, c_graf2 = st.columns(2)
+    st.markdown("---")
+    c1, c2 = st.columns([3, 2])
 
-    with c_graf1:
-        st.subheader("Receita por Região e Categoria")
+    with c1:
+        st.subheader("Desempenho por Região e Linha de Produto")
+        grouped = df_clean.groupby(["region", "category"], as_index=False)[
+            "revenue"
+        ].sum()
         fig_bar = px.bar(
-            df_exibicao.groupby(["Regiao", "Categoria"], as_index=False)[
-                "Valor_Venda"
-            ].sum(),
-            x="Regiao",
-            y="Valor_Venda",
-            color="Categoria",
+            grouped,
+            x="region",
+            y="revenue",
+            color="category",
             barmode="group",
-            template="plotly_white",
+            labels={
+                "region": "Região",
+                "revenue": "Receita (R$)",
+                "category": "Categoria",
+            },
+            color_discrete_sequence=px.colors.qualitative.Safe,
+        )
+        fig_bar.update_layout(
+            margin=dict(t=20, b=20, l=10, r=10), legend_title_text=""
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
-    with c_graf2:
-        st.subheader("Tendência Mensal + Previsão (Machine Learning)")
-        mensal = (
-            df_exibicao.groupby("Mes_Ano", as_index=False)["Valor_Venda"]
-            .sum()
-            .sort_values("Mes_Ano")
+    with c2:
+        st.subheader("Participação por Categoria")
+        cat_share = df_clean.groupby("category", as_index=False)[
+            "revenue"
+        ].sum()
+        fig_pie = px.pie(
+            cat_share,
+            names="category",
+            values="revenue",
+            hole=0.45,
+            color_discrete_sequence=px.colors.qualitative.Safe,
         )
-        mensal["Indice"] = np.arange(len(mensal))
-
-        # Modelo simples de Regressão Linear para projeção futura (3 meses)
-        modelo = LinearRegression()
-        modelo.fit(mensal[["Indice"]], mensal["Valor_Venda"])
-
-        futuros_idx = np.arange(len(mensal), len(mensal) + 3)
-        previsoes = modelo.predict(futuros_idx.reshape(-1, 1))
-
-        df_prev = pd.DataFrame({
-            "Mes_Ano": ["2026-11 (Prev)", "2026-12 (Prev)", "2027-01 (Prev)"],
-            "Valor_Venda": previsoes,
-            "Tipo": "Projeção IA",
-        })
-        mensal["Tipo"] = "Histórico"
-        df_tendencia = pd.concat(
-            [mensal[["Mes_Ano", "Valor_Venda", "Tipo"]], df_prev],
-            ignore_index=True,
-        )
-
-        fig_line = px.line(
-            df_tendencia,
-            x="Mes_Ano",
-            y="Valor_Venda",
-            color="Tipo",
-            markers=True,
-            template="plotly_white",
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
+        fig_pie.update_layout(margin=dict(t=20, b=20, l=10, r=10))
+        st.plotly_chart(fig_pie, use_container_width=True)
 
 # ------------------------------------------
-# ABA 2: ASSISTENTE DE BI COM IA (NLQ)
+# ABA 2: MODELOS PREDITIVOS & ANOMALIAS
 # ------------------------------------------
-with aba2:
-    st.subheader("Consulta em Linguagem Natural (Natural Language Query)")
+with tab_ml:
+    col_f1, col_f2 = st.columns([3, 1])
+    with col_f1:
+        st.subheader("Projeção de Receita (Regressão Ridge com Sazonalidade)")
+    with col_f2:
+        horizon = st.selectbox(
+            "Horizonte de Previsão (meses)", [3, 6, 9], index=0
+        )
+
+    forecast_df = forecast_monthly_revenue(df_clean, periods_ahead=horizon)
+    fig_forecast = px.line(
+        forecast_df,
+        x="month",
+        y="revenue",
+        color="type",
+        markers=True,
+        labels={"month": "Competência", "revenue": "Receita (R$)", "type": ""},
+        color_discrete_map={
+            "Histórico": "#1f77b4",
+            "Projeção (Ridge ML)": "#d62728",
+        },
+    )
+    fig_forecast.update_layout(margin=dict(t=15, b=20))
+    st.plotly_chart(fig_forecast, use_container_width=True)
+
+    st.subheader("Detecção Não-Supervisionada de Anomalias (Isolation Forest)")
+    anomalies_df = detect_transaction_anomalies(df_clean, contamination=0.03)
+    st.caption(
+        f"Foram isoladas {len(anomalies_df)} transações com comportamento"
+        " estatístico atípico entre receita e risco de churn."
+    )
+    if not anomalies_df.empty:
+        cols_show = [
+            c
+            for c in [
+                "transaction_id",
+                "subject_token",
+                "date",
+                "region",
+                "category",
+                "revenue",
+                "churn_probability",
+            ]
+            if c in anomalies_df.columns
+        ]
+        st.dataframe(
+            anomalies_df[cols_show].head(10),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+# ------------------------------------------
+# ABA 3: CONSULTA EM LINGUAGEM NATURAL (NLQ)
+# ------------------------------------------
+with tab_nlq:
+    st.subheader("Motor Analítico Conversacional")
     st.markdown(
-        "Faça perguntas sobre os dados. O motor de IA analisa apenas metadados"
-        " agregados (sem acesso a PII)."
+        "Consulte métricas e dimensões em português. A camada de governança"
+        " remove atributos identificadores antes do processamento."
     )
 
-    perguntas_prontas = [
-        "Selecione uma pergunta exemplo ou digite abaixo...",
-        "Qual região possui o maior faturamento acumulado?",
-        "Qual categoria tem o maior risco médio de churn?",
-        "Qual é o resumo executivo e recomendação estratégica?",
+    presets = [
+        "Qual o faturamento total por região?",
+        "Qual o ticket médio por categoria?",
+        "Qual o risco médio de churn por região?",
+        "Qual o volume de transações por mês?",
     ]
-    escolha = st.selectbox("Sugestões rápidas:", perguntas_prontas)
-    pergunta_usuario = st.text_input(
-        "Ou digite sua pergunta:",
-        value="" if escolha == perguntas_prontas[0] else escolha,
+    selected_preset = st.pills(
+        "Consultas rápidas:", presets, selection_mode="single"
+    )
+    user_query = st.text_input(
+        "Pergunta analítica:",
+        value=selected_preset if selected_preset else presets[0],
     )
 
-    if st.button("Gerar Insight com IA", type="primary"):
-        if not pergunta_usuario.strip():
-            st.info("Digite ou selecione uma pergunta para analisar.")
-        else:
-            p = pergunta_usuario.lower()
-            st.markdown("### 🧠 Resposta do Copiloto Analítico:")
+    if user_query:
+        response = execute_analytical_query(
+            df=df_clean,
+            question=user_query,
+            pii_cols=audit_metadata["detected_pii_columns"],
+            lgpd_active=lgpd_enabled,
+        )
 
-            # Mostra o payload seguro enviado à IA
-            with st.expander(
-                "Ver Payload JSON enviado ao Modelo de IA (Camada de"
-                " Privacidade)"
-            ):
-                colunas_permitidas = [
-                    "Regiao",
-                    "Categoria",
-                    "Valor_Venda",
-                    "Score_Risco_Churn",
-                ]
-                st.json({
-                    "lgpd_filter_applied": modo_lgpd,
-                    "blocked_columns": (
-                        ["Cliente_Nome", "CPF", "Email"]
-                        if modo_lgpd
-                        else ["NENHUMA (RISCO!)"]
-                    ),
-                    "aggregated_sample": (
-                        df_exibicao[colunas_permitidas]
-                        .head(3)
-                        .to_dict(orient="records")
-                    ),
-                })
+        st.info(response["summary"])
 
-            if "região" in p or "regiao" in p or "faturamento" in p:
-                top_reg = (
-                    df_exibicao.groupby("Regiao")["Valor_Venda"]
-                    .sum()
-                    .sort_values(ascending=False)
-                )
-                lider = top_reg.index[0]
-                valor_lider = top_reg.iloc[0]
-                st.write(
-                    f"A região **{lider}** lidera o faturamento com **R$"
-                    f" {valor_lider:,.2f}**, representando"
-                    f" **{(valor_lider/receita_total)*100:.1f}%** da receita"
-                    " total filtrada."
-                )
-                st.bar_chart(top_reg)
+        c_res1, c_res2 = st.columns([2, 3])
+        with c_res1:
+            st.dataframe(
+                response["table"], use_container_width=True, hide_index=True
+            )
+        with c_res2:
+            fig_nlq = px.bar(
+                response["table"],
+                x=response["x_col"],
+                y=response["y_col"],
+                color_discrete_sequence=["#2b5c8f"],
+            )
+            fig_nlq.update_layout(margin=dict(t=10, b=10))
+            st.plotly_chart(fig_nlq, use_container_width=True)
 
-            elif "churn" in p or "risco" in p or "categoria" in p:
-                risco_cat = (
-                    df_exibicao.groupby("Categoria")["Score_Risco_Churn"]
-                    .mean()
-                    .sort_values(ascending=False)
-                )
-                cat_critica = risco_cat.index[0]
-                st.write(
-                    f"A categoria **{cat_critica}** apresenta o maior índice"
-                    f" médio de risco de cancelamento (Churn) em **{risco_cat.iloc[0]*100:.1f}%**. "
-                    "Recomenda-se ação preventiva de retenção para clientes"
-                    " deste segmento."
-                )
-                st.bar_chart(risco_cat)
-
-            else:
-                top_cat = (
-                    df_exibicao.groupby("Categoria")["Valor_Venda"]
-                    .sum()
-                    .idxmax()
-                )
-                top_reg = (
-                    df_exibicao.groupby("Regiao")["Valor_Venda"].sum().idxmax()
-                )
-                st.write(f"""
-                **Diagnóstico Automatizado:**
-                * **Motor de Receita:** A combinação de maior impacto concentra-se na região **{top_reg}** e na vertical **{top_cat}**.
-                * **Alerta de Governança:** O pipeline está operando com proteção LGPD **{'ATIVADA' if modo_lgpd else 'DESATIVADA'}**.
-                * **Próximo Passo Sugerido:** Priorizar campanhas de upsell na região {top_reg} e mitigar churn nos contratos de alto ticket.
-                """)
+        with st.expander("Inspecionar Metadados de Privacidade da Consulta"):
+            st.json(response["governance_payload"])
 
 # ------------------------------------------
-# ABA 3: AUDITORIA DE PRIVACIDADE & DADOS
+# ABA 4: AUDITORIA LGPD & LINHAGEM
 # ------------------------------------------
-with aba3:
-    st.subheader("Inspeção da Tabela de Dados (Antes vs. Depois da LGPD)")
-    st.markdown(
-        "Alterne o botão **'Ativar Proteção de Dados (LGPD)'** na barra"
-        " lateral para observar o mascaramento, pseudonimização (Hash) e"
-        " ruído de Privacidade Diferencial."
-    )
+with tab_audit:
+    st.subheader("Registro de Auditoria e Amostra de Dados Processados")
+    col_a1, col_a2 = st.columns([1, 2])
 
-    colunas_mostrar = [
-        "ID_Transacao",
-        "Data",
-        "Cliente_Nome",
-        "CPF",
-        "Email",
-        "Regiao",
-        "Categoria",
-        "Valor_Venda",
-    ]
-    if modo_lgpd and "ID_Cliente_Hash" in df_exibicao.columns:
-        colunas_mostrar.insert(2, "ID_Cliente_Hash")
+    with col_a1:
+        st.markdown("**Metadados de Execução**")
+        st.json(audit_metadata)
 
-    st.dataframe(df_exibicao[colunas_mostrar].head(20), use_container_width=True)
+    with col_a2:
+        st.markdown(
+            "**Visualização da Camada de Dados (25 primeiros registros)**"
+        )
+        st.dataframe(
+            df_clean.head(25), use_container_width=True, hide_index=True
+        )
+        
